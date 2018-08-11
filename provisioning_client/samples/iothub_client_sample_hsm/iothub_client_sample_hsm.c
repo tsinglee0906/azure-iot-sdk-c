@@ -128,7 +128,7 @@ int main(void)
                     }
                     else
                     {
-                        if (IoTHubClient_LL_SendEventAsync(device_ll_handle, msg_handle, NULL, NULL) != IOTHUB_CLIENT_OK)
+                        if (IoTHubDeviceClient_LL_SendEventAsync(device_ll_handle, msg_handle, NULL, NULL) != IOTHUB_CLIENT_OK)
                         {
                             (void)printf("ERROR: IoTHubClient_LL_SendEventAsync..........FAILED!\r\n");
                         }

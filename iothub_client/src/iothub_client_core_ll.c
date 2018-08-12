@@ -316,13 +316,11 @@ static int create_edge_handle(IOTHUB_CLIENT_CORE_LL_HANDLE_DATA* handle_data, co
     return result;
 }
 
-static int create_blob_upload_module(IOTHUB_CLIENT_CORE_LL_HANDLE_DATA* handle_data, const IOTHUB_CLIENT_CONFIG* config)
+static int create_blob_upload_module(IOTHUB_CLIENT_CORE_LL_HANDLE_DATA* handle_data, const char* hostname)
 {
     int result;
-    (void)handle_data;
-    (void)config;
 #ifndef DONT_USE_UPLOADTOBLOB
-    handle_data->uploadToBlobHandle = IoTHubClient_LL_UploadToBlob_Create(config);
+    handle_data->uploadToBlobHandle = IoTHubClient_LL_UploadToBlob_Create(handle_data->authorization_module, hostname);
     if (handle_data->uploadToBlobHandle == NULL)
     {
         LogError("unable to IoTHubClientCore_LL_UploadToBlob_Create");
@@ -333,6 +331,8 @@ static int create_blob_upload_module(IOTHUB_CLIENT_CORE_LL_HANDLE_DATA* handle_d
         result = 0;
     }
 #else
+    (void)handle_data;
+    (void)hostname;
     result = 0;
 #endif
     return result;
@@ -557,7 +557,7 @@ static IOTHUB_CLIENT_CORE_LL_HANDLE_DATA* initialize_iothub_client(const IOTHUB_
             }
             if (result != NULL)
             {
-                if (create_blob_upload_module(result, config) != 0)
+                if (create_blob_upload_module(result, IoTHubName) != 0)
                 {
                     LogError("unable to create blob upload");
                     // Codes_SRS_IOTHUBCLIENT_LL_09_010: [ If any failure occurs `IoTHubClientCore_LL_Create` shall destroy the `transportHandle` only if it has created it ]

@@ -9,6 +9,7 @@
 #include <string.h>
 #include "azure_c_shared_utility/optimize_size.h"
 #include "azure_c_shared_utility/gballoc.h"
+#include "azure_c_shared_utility/crt_abstractions.h"
 #include "azure_c_shared_utility/string_tokenizer.h"
 #include "azure_c_shared_utility/doublylinkedlist.h"
 #include "azure_c_shared_utility/xlogging.h"
@@ -20,6 +21,7 @@
 #include "iothub_client_core_ll.h"
 #include "iothub_client_options.h"
 #include "internal/iothub_client_private.h"
+#include "internal/iothub_client_authorization.h"
 #include "iothub_client_version.h"
 #include "iothub_transport_ll.h"
 #include "parson.h"
@@ -44,33 +46,25 @@ int snprintf(char * s, size_t n, const char * format, ...)
 /*Codes_SRS_IOTHUBCLIENT_LL_02_085: [ IoTHubClient_LL_UploadToBlob shall use the same authorization as step 1. to prepare and perform a HTTP request with the following parameters: ]*/
 #define FILE_UPLOAD_FAILED_BODY "{ \"isSuccess\":false, \"statusCode\":-1,\"statusDescription\" : \"client not able to connect with the server\" }"
 #define FILE_UPLOAD_ABORTED_BODY "{ \"isSuccess\":false, \"statusCode\":-1,\"statusDescription\" : \"file upload aborted\" }"
-
-#define AUTHORIZATION_SCHEME_VALUES \
-    DEVICE_KEY, \
-    X509,       \
-    SAS_TOKEN
-DEFINE_ENUM(AUTHORIZATION_SCHEME, AUTHORIZATION_SCHEME_VALUES);
+#define SAS_TOKEN_DEFAULT_LIFETIME          3600
 
 typedef struct UPLOADTOBLOB_X509_CREDENTIALS_TAG
 {
-    const char* x509certificate;
-    const char* x509privatekey;
+    char* x509certificate;
+    char* x509privatekey;
 }UPLOADTOBLOB_X509_CREDENTIALS;
 
 typedef struct IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA_TAG
 {
-    STRING_HANDLE deviceId;                     /*needed for file upload*/
-    const char* hostname;                       /*needed for file upload*/
-    AUTHORIZATION_SCHEME authorizationScheme;   /*needed for file upload*/
-    union {
-        STRING_HANDLE deviceKey;    /*used when authorizationScheme is DEVICE_KEY*/
-        STRING_HANDLE sas;          /*used when authorizationScheme is SAS_TOKEN*/
-        UPLOADTOBLOB_X509_CREDENTIALS x509credentials; /*assumed to be used when both deviceKey and deviceSasToken are NULL*/
-    } credentials;                              /*needed for file upload*/
+    IOTHUB_AUTHORIZATION_HANDLE authorization_module;
+    char* hostname;                       /*needed for file upload*/
     char* certificates; /*if there are any certificates used*/
     HTTP_PROXY_OPTIONS http_proxy_options;
     size_t curl_verbose;
     size_t blob_upload_timeout_secs;
+    char* sas_scope;
+    char* sas_keyname;
+    UPLOADTOBLOB_X509_CREDENTIALS x509_creds;
 }IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA;
 
 typedef struct BLOB_UPLOAD_CONTEXT_TAG
@@ -80,92 +74,35 @@ typedef struct BLOB_UPLOAD_CONTEXT_TAG
     size_t remainingSizeToUpload; /* size not yet uploaded */
 }BLOB_UPLOAD_CONTEXT;
 
-IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE IoTHubClient_LL_UploadToBlob_Create(const IOTHUB_CLIENT_CONFIG* config)
+IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE IoTHubClient_LL_UploadToBlob_Create(IOTHUB_AUTHORIZATION_HANDLE authorization_module, const char* hostname)
 {
-    IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA* handleData = malloc(sizeof(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA));
-    if (handleData == NULL)
+    IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA* handleData;
+    if (authorization_module == NULL || hostname == NULL)
     {
-        LogError("oom - malloc");
-        /*return as is*/
+        LogError("Invalid parameter value");
+        handleData = NULL;
     }
     else
     {
-        size_t iotHubNameLength = strlen(config->iotHubName);
-        size_t iotHubSuffixLength = strlen(config->iotHubSuffix);
-        handleData->deviceId = STRING_construct(config->deviceId);
-        if (handleData->deviceId == NULL)
+        handleData = malloc(sizeof(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA));
+        if (handleData == NULL)
         {
-            LogError("unable to STRING_construct");
-            free(handleData);
-            handleData = NULL;
+            LogError("unable to allocate upload blob handle");
+            /*return as is*/
         }
         else
         {
-            handleData->hostname = malloc(iotHubNameLength + 1 + iotHubSuffixLength + 1); /*first +1 is because "." the second +1 is because \0*/
-            if (handleData->hostname == NULL)
+            memset(handleData, 0, sizeof(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA) );
+            handleData->authorization_module = authorization_module;
+            if (mallocAndStrcpy_s(&handleData->hostname, hostname) != 0)
             {
-                LogError("malloc failed");
-                STRING_delete(handleData->deviceId);
+                LogError("allocating hostname failed");
                 free(handleData);
                 handleData = NULL;
             }
             else
             {
-                char* insert_pos = (char*)handleData->hostname;
-                (void)memcpy((char*)insert_pos, config->iotHubName, iotHubNameLength);
-                insert_pos += iotHubNameLength;
-                *insert_pos = '.';
-                insert_pos += 1;
-                (void)memcpy(insert_pos, config->iotHubSuffix, iotHubSuffixLength); /*+1 will copy the \0 too*/
-                insert_pos += iotHubSuffixLength;
-                *insert_pos = '\0';
-
-                handleData->certificates = NULL;
-                memset(&(handleData->http_proxy_options), 0, sizeof(HTTP_PROXY_OPTIONS));
-                handleData->curl_verbose = 0;
-                handleData->blob_upload_timeout_secs = 0;
-
-                if ((config->deviceSasToken != NULL) && (config->deviceKey == NULL))
-                {
-                    handleData->authorizationScheme = SAS_TOKEN;
-                    handleData->credentials.sas = STRING_construct(config->deviceSasToken);
-                    if (handleData->credentials.sas == NULL)
-                    {
-                        LogError("unable to STRING_construct");
-                        free((void*)handleData->hostname);
-                        STRING_delete(handleData->deviceId);
-                        free(handleData);
-                        handleData = NULL;
-                    }
-                    else
-                    {
-                        /*return as is*/
-                    }
-                }
-                else if ((config->deviceSasToken == NULL) && (config->deviceKey != NULL))
-                {
-                    handleData->authorizationScheme = DEVICE_KEY;
-                    handleData->credentials.deviceKey = STRING_construct(config->deviceKey);
-                    if (handleData->credentials.deviceKey == NULL)
-                    {
-                        LogError("unable to STRING_construct");
-                        free((void*)handleData->hostname);
-                        STRING_delete(handleData->deviceId);
-                        free(handleData);
-                        handleData = NULL;
-                    }
-                    else
-                    {
-                        /*return as is*/
-                    }
-                }
-                else if ((config->deviceSasToken == NULL) && (config->deviceKey == NULL))
-                {
-                    handleData->authorizationScheme = X509;
-                    handleData->credentials.x509credentials.x509certificate = NULL;
-                    handleData->credentials.x509credentials.x509privatekey = NULL;
-                    /*return as is*/
-                }
+                // Save Scope and Keyname
             }
         }
     }
@@ -190,7 +127,7 @@ static int IoTHubClient_LL_UploadToBlob_step1and2(IOTHUB_CLIENT_LL_UPLOADTOBLOB_
     else
     {
         if (!(
-            (STRING_concat_with_STRING(relativePath, handleData->deviceId) == 0) &&
+            (STRING_concat(relativePath, IoTHubClient_Auth_Get_DeviceId(handleData->authorization_module)) == 0) &&
             (STRING_concat(relativePath, "/files") == 0) &&
             (STRING_concat(relativePath, API_VERSION) == 0)
             ))
@@ -243,13 +180,15 @@ static int IoTHubClient_LL_UploadToBlob_step1and2(IOTHUB_CLIENT_LL_UPLOADTOBLOB_
                         }
                         else
                         {
+                            IOTHUB_CREDENTIAL_TYPE cred_type = IoTHubClient_Auth_Get_Credential_Type(handleData->authorization_module);
+
                             /*Codes_SRS_IOTHUBCLIENT_LL_02_072: [ IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall add the following name:value to request HTTP headers: ] "Content-Type": "application/json" "Accept": "application/json" "User-Agent": "iothubclient/" IOTHUB_SDK_VERSION*/
                             /*Codes_SRS_IOTHUBCLIENT_LL_02_107: [ - "Authorization" header shall not be build. ]*/
                             if (!(
                                 (HTTPHeaders_AddHeaderNameValuePair(requestHttpHeaders, "Content-Type", "application/json") == HTTP_HEADERS_OK) &&
                                 (HTTPHeaders_AddHeaderNameValuePair(requestHttpHeaders, "Accept", "application/json") == HTTP_HEADERS_OK) &&
                                 (HTTPHeaders_AddHeaderNameValuePair(requestHttpHeaders, "User-Agent", "iothubclient/" IOTHUB_SDK_VERSION) == HTTP_HEADERS_OK) &&
-                                (handleData->authorizationScheme == X509 || (HTTPHeaders_AddHeaderNameValuePair(requestHttpHeaders, "Authorization", "") == HTTP_HEADERS_OK))
+                                (cred_type == IOTHUB_CREDENTIAL_TYPE_X509 || (HTTPHeaders_AddHeaderNameValuePair(requestHttpHeaders, "Authorization", "") == HTTP_HEADERS_OK))
                                 ))
                             {
                                 /*Codes_SRS_IOTHUBCLIENT_LL_02_071: [ If creating the HTTP headers fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
@@ -261,16 +200,16 @@ static int IoTHubClient_LL_UploadToBlob_step1and2(IOTHUB_CLIENT_LL_UPLOADTOBLOB_
                                 int wasIoTHubRequestSuccess = 0; /*!=0 means responseContent has a buffer that should be parsed by parson after executing the below switch*/
                                 /* set the result to error by default */
                                 result = __FAILURE__;
-                                switch (handleData->authorizationScheme)
+                                switch (cred_type)
                                 {
                                 default:
                                 {
                                     /*wasIoTHubRequestSuccess takes care of the return value*/
-                                    LogError("Internal Error: unexpected value in handleData->authorizationScheme = %d", handleData->authorizationScheme);
+                                    LogError("Internal Error: unexpected value in credential type = %d", cred_type);
                                     result = __FAILURE__;
                                     break;
                                 }
-                                case(X509):
+                                case(IOTHUB_CREDENTIAL_TYPE_X509):
                                 {
                                     unsigned int statusCode;
                                     /*Codes_SRS_IOTHUBCLIENT_LL_32_003: [ IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall execute HTTPAPIEX_ExecuteRequest passing the following information for arguments: ]*/
@@ -304,9 +243,10 @@ static int IoTHubClient_LL_UploadToBlob_step1and2(IOTHUB_CLIENT_LL_UPLOADTOBLOB_
                                     }
                                     break;
                                 }
-                                case (SAS_TOKEN):
+                                case (IOTHUB_CREDENTIAL_TYPE_SAS_TOKEN):
+                                case (IOTHUB_CREDENTIAL_TYPE_DEVICE_AUTH):
                                 {
-                                    const char* sasToken = STRING_c_str(handleData->credentials.sas);
+                                    const char* sasToken = IoTHubClient_Auth_Get_SasToken(handleData->authorization_module, handleData->sas_scope, SAS_TOKEN_DEFAULT_LIFETIME, handleData->sas_keyname);
                                     /*Codes_SRS_IOTHUBCLIENT_LL_02_073: [ If the credentials used to create handle have "sasToken" then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall add the following HTTP request headers: ]*/
                                     if (HTTPHeaders_ReplaceHeaderNameValuePair(requestHttpHeaders, "Authorization", sasToken) != HTTP_HEADERS_OK)
                                     {
@@ -349,7 +289,7 @@ static int IoTHubClient_LL_UploadToBlob_step1and2(IOTHUB_CLIENT_LL_UPLOADTOBLOB_
                                     }
                                     break;
                                 }
-                                case(DEVICE_KEY):
+                                case(IOTHUB_CREDENTIAL_TYPE_DEVICE_KEY):
                                 {
                                     /*Codes_SRS_IOTHUBCLIENT_LL_02_078: [ If the credentials used to create handle have "deviceKey" then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall create an HTTPAPIEX_SAS_HANDLE passing as arguments: ]*/
                                     STRING_HANDLE uriResource = STRING_construct(handleData->hostname);
@@ -363,66 +303,56 @@ static int IoTHubClient_LL_UploadToBlob_step1and2(IOTHUB_CLIENT_LL_UPLOADTOBLOB_
                                     {
                                         if (!(
                                             (STRING_concat(uriResource, "/devices/") == 0) &&
-                                            (STRING_concat_with_STRING(uriResource, handleData->deviceId) == 0)
+                                            (STRING_concat(uriResource, IoTHubClient_Auth_Get_DeviceId(handleData->authorization_module)) == 0)
                                             ))
                                         {
                                             /*Codes_SRS_IOTHUBCLIENT_LL_02_089: [ If creating the HTTPAPIEX_SAS_HANDLE fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
-                                            LogError("unable to STRING_concat_with_STRING");
+                                            LogError("unable to STRING_concat");
                                             result = __FAILURE__;
                                         }
                                         else
                                         {
-                                            STRING_HANDLE empty = STRING_new();
-                                            if (empty == NULL)
+                                            /*Codes_SRS_IOTHUBCLIENT_LL_02_089: [ If creating the HTTPAPIEX_SAS_HANDLE fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
+                                            HTTPAPIEX_SAS_HANDLE sasHandle = HTTPAPIEX_SAS_Create_From_String(IoTHubClient_Auth_Get_DeviceKey(handleData->authorization_module), STRING_c_str(uriResource), "");
+                                            if (sasHandle == NULL)
                                             {
-                                                LogError("unable to STRING_new");
+                                                LogError("unable to HTTPAPIEX_SAS_Create");
                                                 result = __FAILURE__;
                                             }
                                             else
                                             {
-                                                /*Codes_SRS_IOTHUBCLIENT_LL_02_089: [ If creating the HTTPAPIEX_SAS_HANDLE fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
-                                                HTTPAPIEX_SAS_HANDLE sasHandle = HTTPAPIEX_SAS_Create(handleData->credentials.deviceKey, uriResource, empty);
-                                                if (sasHandle == NULL)
+                                                unsigned int statusCode;
+                                                /*Codes_SRS_IOTHUBCLIENT_LL_32_005: [ IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall call HTTPAPIEX_SAS_ExecuteRequest passing as arguments: ]*/
+                                                if (HTTPAPIEX_SAS_ExecuteRequest(
+                                                    sasHandle,                      /*HTTPAPIEX_SAS_HANDLE sasHandle - the created HTTPAPIEX_SAS_HANDLE*/
+                                                    iotHubHttpApiExHandle,          /*HTTPAPIEX_HANDLE handle - the created HTTPAPIEX_HANDLE*/
+                                                    HTTPAPI_REQUEST_POST,           /*HTTPAPI_REQUEST_TYPE requestType - HTTPAPI_REQUEST_POST*/
+                                                    STRING_c_str(relativePath),     /*const char* relativePath - the HTTP relative path*/
+                                                    requestHttpHeaders,             /*HTTP_HEADERS_HANDLE requestHttpHeadersHandle - request HTTP headers*/
+                                                    blobBuffer,                     /*BUFFER_HANDLE requestContent - address of JSON with optional/directory/tree/filename*/
+                                                    &statusCode,                    /*unsigned int* statusCode - the address of an unsigned int that will contain the HTTP status code*/
+                                                    NULL,                           /*HTTP_HEADERS_HANDLE responseHeadersHandle - NULL*/
+                                                    responseContent
+                                                ) != HTTPAPIEX_OK)
                                                 {
-                                                    LogError("unable to HTTPAPIEX_SAS_Create");
+                                                    /*Codes_SRS_IOTHUBCLIENT_LL_02_079: [ If HTTPAPIEX_SAS_ExecuteRequest fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
+                                                    LogError("unable to HTTPAPIEX_SAS_ExecuteRequest");
                                                     result = __FAILURE__;
                                                 }
                                                 else
                                                 {
-                                                    unsigned int statusCode;
-                                                    /*Codes_SRS_IOTHUBCLIENT_LL_32_005: [ IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall call HTTPAPIEX_SAS_ExecuteRequest passing as arguments: ]*/
-                                                    if (HTTPAPIEX_SAS_ExecuteRequest(
-                                                        sasHandle,                      /*HTTPAPIEX_SAS_HANDLE sasHandle - the created HTTPAPIEX_SAS_HANDLE*/
-                                                        iotHubHttpApiExHandle,          /*HTTPAPIEX_HANDLE handle - the created HTTPAPIEX_HANDLE*/
-                                                        HTTPAPI_REQUEST_POST,           /*HTTPAPI_REQUEST_TYPE requestType - HTTPAPI_REQUEST_POST*/
-                                                        STRING_c_str(relativePath),     /*const char* relativePath - the HTTP relative path*/
-                                                        requestHttpHeaders,             /*HTTP_HEADERS_HANDLE requestHttpHeadersHandle - request HTTP headers*/
-                                                        blobBuffer,                     /*BUFFER_HANDLE requestContent - address of JSON with optional/directory/tree/filename*/
-                                                        &statusCode,                    /*unsigned int* statusCode - the address of an unsigned int that will contain the HTTP status code*/
-                                                        NULL,                           /*HTTP_HEADERS_HANDLE responseHeadersHandle - NULL*/
-                                                        responseContent
-                                                    ) != HTTPAPIEX_OK)
+                                                    if (statusCode >= 300)
                                                     {
-                                                        /*Codes_SRS_IOTHUBCLIENT_LL_02_079: [ If HTTPAPIEX_SAS_ExecuteRequest fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
-                                                        LogError("unable to HTTPAPIEX_SAS_ExecuteRequest");
+                                                        /*Codes_SRS_IOTHUBCLIENT_LL_02_080: [ If status code is greater than or equal to 300 then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
                                                         result = __FAILURE__;
+                                                        LogError("HTTP code was %u", statusCode);
                                                     }
                                                     else
                                                     {
-                                                        if (statusCode >= 300)
-                                                        {
-                                                            /*Codes_SRS_IOTHUBCLIENT_LL_02_080: [ If status code is greater than or equal to 300 then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
-                                                            result = __FAILURE__;
-                                                            LogError("HTTP code was %u", statusCode);
-                                                        }
-                                                        else
-                                                        {
-                                                            wasIoTHubRequestSuccess = 1;
-                                                        }
+                                                        wasIoTHubRequestSuccess = 1;
                                                     }
-                                                    HTTPAPIEX_SAS_Destroy(sasHandle);
                                                 }
-                                                STRING_delete(empty);
+                                                HTTPAPIEX_SAS_Destroy(sasHandle);
                                             }
                                         }
                                         STRING_delete(uriResource);
@@ -605,9 +535,10 @@ static int IoTHubClient_LL_UploadToBlob_step3(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HAND
     }
     else
     {
+        const char* device_id = IoTHubClient_Auth_Get_DeviceId(handleData->authorization_module);
         if (!(
             (STRING_concat(uriResource, "/devices/") == 0) &&
-            (STRING_concat_with_STRING(uriResource, handleData->deviceId) == 0) &&
+            (STRING_concat(uriResource, device_id) == 0) &&
             (STRING_concat(uriResource, "/files/notifications") == 0)
             ))
         {
@@ -625,7 +556,7 @@ static int IoTHubClient_LL_UploadToBlob_step3(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HAND
             else
             {
                 if (!(
-                    (STRING_concat_with_STRING(relativePathNotification, handleData->deviceId) == 0) &&
+                    (STRING_concat(relativePathNotification, device_id) == 0) &&
                     (STRING_concat(relativePathNotification, "/files/notifications/") == 0) &&
                     (STRING_concat(relativePathNotification, STRING_c_str(correlationId)) == 0) &&
                     (STRING_concat(relativePathNotification, API_VERSION) == 0)
@@ -636,8 +567,10 @@ static int IoTHubClient_LL_UploadToBlob_step3(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HAND
                 }
                 else
                 {
+                    IOTHUB_CREDENTIAL_TYPE cred_type = IoTHubClient_Auth_Get_Credential_Type(handleData->authorization_module);
+ 
                     /*Codes_SRS_IOTHUBCLIENT_LL_02_086: [ If performing the HTTP request fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
-                    switch (handleData->authorizationScheme)
+                    switch (cred_type)
                     {
                     default:
                     {
@@ -645,7 +578,7 @@ static int IoTHubClient_LL_UploadToBlob_step3(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HAND
                         result = __FAILURE__;
                         break;
                     }
-                    case (X509):
+                    case (IOTHUB_CREDENTIAL_TYPE_X509):
                     {
                         unsigned int notificationStatusCode;
                         if (HTTPAPIEX_ExecuteRequest(
@@ -676,62 +609,53 @@ static int IoTHubClient_LL_UploadToBlob_step3(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HAND
                         }
                         break;
                     }
-                    case (DEVICE_KEY):
+                    case (IOTHUB_CREDENTIAL_TYPE_DEVICE_KEY):
                     {
-                        STRING_HANDLE empty = STRING_new();
-                        if (empty == NULL)
+                        HTTPAPIEX_SAS_HANDLE sasHandle = HTTPAPIEX_SAS_Create_From_String(IoTHubClient_Auth_Get_DeviceKey(handleData->authorization_module), STRING_c_str(uriResource), "");
+                        if (sasHandle == NULL)
                         {
-                            LogError("unable to STRING_new");
+                            LogError("unable to HTTPAPIEX_SAS_Create");
                             result = __FAILURE__;
                         }
                         else
                         {
-                            HTTPAPIEX_SAS_HANDLE sasHandle = HTTPAPIEX_SAS_Create(handleData->credentials.deviceKey, uriResource, empty);
-                            if (sasHandle == NULL)
+                            unsigned int statusCode;
+                            if (HTTPAPIEX_SAS_ExecuteRequest(
+                                sasHandle,                      /*HTTPAPIEX_SAS_HANDLE sasHandle - the created HTTPAPIEX_SAS_HANDLE*/
+                                iotHubHttpApiExHandle,          /*HTTPAPIEX_HANDLE handle - the created HTTPAPIEX_HANDLE*/
+                                HTTPAPI_REQUEST_POST,            /*HTTPAPI_REQUEST_TYPE requestType - HTTPAPI_REQUEST_GET*/
+                                STRING_c_str(relativePathNotification),     /*const char* relativePath - the HTTP relative path*/
+                                requestHttpHeaders,             /*HTTP_HEADERS_HANDLE requestHttpHeadersHandle - request HTTP headers*/
+                                messageBody,                    /*BUFFER_HANDLE requestContent*/
+                                &statusCode,                    /*unsigned int* statusCode - the address of an unsigned int that will contain the HTTP status code*/
+                                NULL,                           /*HTTP_HEADERS_HANDLE responseHeadersHandle - NULL*/
+                                NULL
+                            ) != HTTPAPIEX_OK)
                             {
-                                LogError("unable to HTTPAPIEX_SAS_Create");
+                                /*Codes_SRS_IOTHUBCLIENT_LL_02_079: [ If HTTPAPIEX_SAS_ExecuteRequest fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
+                                LogError("unable to HTTPAPIEX_SAS_ExecuteRequest");
                                 result = __FAILURE__;
+                                ;
                             }
                             else
                             {
-                                unsigned int statusCode;
-                                if (HTTPAPIEX_SAS_ExecuteRequest(
-                                    sasHandle,                      /*HTTPAPIEX_SAS_HANDLE sasHandle - the created HTTPAPIEX_SAS_HANDLE*/
-                                    iotHubHttpApiExHandle,          /*HTTPAPIEX_HANDLE handle - the created HTTPAPIEX_HANDLE*/
-                                    HTTPAPI_REQUEST_POST,            /*HTTPAPI_REQUEST_TYPE requestType - HTTPAPI_REQUEST_GET*/
-                                    STRING_c_str(relativePathNotification),     /*const char* relativePath - the HTTP relative path*/
-                                    requestHttpHeaders,             /*HTTP_HEADERS_HANDLE requestHttpHeadersHandle - request HTTP headers*/
-                                    messageBody,                    /*BUFFER_HANDLE requestContent*/
-                                    &statusCode,                    /*unsigned int* statusCode - the address of an unsigned int that will contain the HTTP status code*/
-                                    NULL,                           /*HTTP_HEADERS_HANDLE responseHeadersHandle - NULL*/
-                                    NULL
-                                ) != HTTPAPIEX_OK)
+                                if (statusCode >= 300)
                                 {
-                                    /*Codes_SRS_IOTHUBCLIENT_LL_02_079: [ If HTTPAPIEX_SAS_ExecuteRequest fails then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR. ]*/
-                                    LogError("unable to HTTPAPIEX_SAS_ExecuteRequest");
+                                    /*Codes_SRS_IOTHUBCLIENT_LL_02_087: [If the statusCode of the HTTP request is greater than or equal to 300 then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR]*/
                                     result = __FAILURE__;
-                                    ;
+                                    LogError("HTTP code was %u", statusCode);
                                 }
                                 else
                                 {
-                                    if (statusCode >= 300)
-                                    {
-                                        /*Codes_SRS_IOTHUBCLIENT_LL_02_087: [If the statusCode of the HTTP request is greater than or equal to 300 then IoTHubClient_LL_UploadMultipleBlocksToBlob(Ex) shall fail and return IOTHUB_CLIENT_ERROR]*/
-                                        result = __FAILURE__;
-                                        LogError("HTTP code was %u", statusCode);
-                                    }
-                                    else
-                                    {
-                                        result = 0;
-                                    }
+                                    result = 0;
                                 }
-                                HTTPAPIEX_SAS_Destroy(sasHandle);
                             }
-                            STRING_delete(empty);
+                            HTTPAPIEX_SAS_Destroy(sasHandle);
                         }
                         break;
                     }
-                    case(SAS_TOKEN):
+                    case (IOTHUB_CREDENTIAL_TYPE_SAS_TOKEN):
+                    case (IOTHUB_CREDENTIAL_TYPE_DEVICE_AUTH):
                     {
                         unsigned int notificationStatusCode;
                         if (HTTPAPIEX_ExecuteRequest(
@@ -862,13 +786,13 @@ IOTHUB_CLIENT_RESULT IoTHubClient_LL_UploadMultipleBlocksToBlob_Impl(IOTHUB_CLIE
             (void)HTTPAPIEX_SetOption(iotHubHttpApiExHandle, OPTION_CURL_VERBOSE, &handleData->curl_verbose);
 
             if (
-                (handleData->authorizationScheme == X509) &&
+                (IoTHubClient_Auth_Get_Credential_Type(handleData->authorization_module) == IOTHUB_CREDENTIAL_TYPE_X509) &&
 
                 /*transmit the x509certificate and x509privatekey*/
                 /*Codes_SRS_IOTHUBCLIENT_LL_02_106: [ - x509certificate and x509privatekey saved options shall be passed on the HTTPAPIEX_SetOption ]*/
                 (!(
-                    (HTTPAPIEX_SetOption(iotHubHttpApiExHandle, OPTION_X509_CERT, handleData->credentials.x509credentials.x509certificate) == HTTPAPIEX_OK) &&
-                    (HTTPAPIEX_SetOption(iotHubHttpApiExHandle, OPTION_X509_PRIVATE_KEY, handleData->credentials.x509credentials.x509privatekey) == HTTPAPIEX_OK)
+                    (HTTPAPIEX_SetOption(iotHubHttpApiExHandle, OPTION_X509_CERT, handleData->x509_creds.x509certificate) == HTTPAPIEX_OK) &&
+                    (HTTPAPIEX_SetOption(iotHubHttpApiExHandle, OPTION_X509_PRIVATE_KEY, handleData->x509_creds.x509privatekey) == HTTPAPIEX_OK)
                 ))
                 )
             {
@@ -1089,38 +1013,15 @@ void IoTHubClient_LL_UploadToBlob_Destroy(IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE h
     else
     {
         IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA* handleData = (IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE_DATA*)handle;
-        switch (handleData->authorizationScheme)
+        if (handleData->x509_creds.x509certificate != NULL)
         {
-            case(SAS_TOKEN):
-            {
-                STRING_delete(handleData->credentials.sas);
-                break;
-            }
-            case(DEVICE_KEY):
-            {
-                STRING_delete(handleData->credentials.deviceKey);
-                break;
-            }
-            case(X509):
-            {
-                if (handleData->credentials.x509credentials.x509certificate != NULL)
-                {
-                    free((void*)handleData->credentials.x509credentials.x509certificate);
-                }
-                if (handleData->credentials.x509credentials.x509privatekey != NULL)
-                {
-                    free((void*)handleData->credentials.x509credentials.x509privatekey);
-                }
-                break;
-            }
-            default:
-            {
-                LogError("INTERNAL ERROR");
-                break;
-            }
+            free((void*)handleData->x509_creds.x509certificate);
+        }
+        if (handleData->x509_creds.x509privatekey != NULL)
+        {
+            free((void*)handleData->x509_creds.x509privatekey);
         }
         free((void*)handleData->hostname);
-        STRING_delete(handleData->deviceId);
         if (handleData->certificates != NULL)
         {
             free(handleData->certificates);
@@ -1158,7 +1059,7 @@ IOTHUB_CLIENT_RESULT IoTHubClient_LL_UploadToBlob_SetOption(IOTHUB_CLIENT_LL_UPL
         if (strcmp(optionName, OPTION_X509_CERT) == 0)
         {
             /*Codes_SRS_IOTHUBCLIENT_LL_02_109: [ If the authentication scheme is NOT x509 then IoTHubClient_LL_UploadToBlob_SetOption shall return IOTHUB_CLIENT_INVALID_ARG. ]*/
-            if (handleData->authorizationScheme != X509)
+            if (IoTHubClient_Auth_Get_Credential_Type(handleData->authorization_module) != IOTHUB_CREDENTIAL_TYPE_X509)
             {
                 LogError("trying to set a x509 certificate while the authentication scheme is not x509");
                 result = IOTHUB_CLIENT_INVALID_ARG;
@@ -1177,11 +1078,11 @@ IOTHUB_CLIENT_RESULT IoTHubClient_LL_UploadToBlob_SetOption(IOTHUB_CLIENT_LL_UPL
                 else
                 {
                     /*Codes_SRS_IOTHUBCLIENT_LL_02_105: [ Otherwise IoTHubClient_LL_UploadToBlob_SetOption shall succeed and return IOTHUB_CLIENT_OK. ]*/
-                    if (handleData->credentials.x509credentials.x509certificate != NULL) /*free any previous values, if any*/
+                    if (handleData->x509_creds.x509certificate != NULL) /*free any previous values, if any*/
                     {
-                        free((void*)handleData->credentials.x509credentials.x509certificate);
+                        free((void*)handleData->x509_creds.x509certificate);
                     }
-                    handleData->credentials.x509credentials.x509certificate = temp;
+                    handleData->x509_creds.x509certificate = temp;
                     result = IOTHUB_CLIENT_OK;
                 }
             }
@@ -1190,7 +1091,7 @@ IOTHUB_CLIENT_RESULT IoTHubClient_LL_UploadToBlob_SetOption(IOTHUB_CLIENT_LL_UPL
         else if (strcmp(optionName, OPTION_X509_PRIVATE_KEY) == 0)
         {
             /*Codes_SRS_IOTHUBCLIENT_LL_02_109: [ If the authentication scheme is NOT x509 then IoTHubClient_LL_UploadToBlob_SetOption shall return IOTHUB_CLIENT_INVALID_ARG. ]*/
-            if (handleData->authorizationScheme != X509)
+            if (IoTHubClient_Auth_Get_Credential_Type(handleData->authorization_module) != IOTHUB_CREDENTIAL_TYPE_X509)
             {
                 LogError("trying to set a x509 privatekey while the authentication scheme is not x509");
                 result = IOTHUB_CLIENT_INVALID_ARG;
@@ -1209,11 +1110,11 @@ IOTHUB_CLIENT_RESULT IoTHubClient_LL_UploadToBlob_SetOption(IOTHUB_CLIENT_LL_UPL
                 else
                 {
                     /*Codes_SRS_IOTHUBCLIENT_LL_02_105: [ Otherwise IoTHubClient_LL_UploadToBlob_SetOption shall succeed and return IOTHUB_CLIENT_OK. ]*/
-                    if (handleData->credentials.x509credentials.x509privatekey != NULL) /*free any previous values, if any*/
+                    if (handleData->x509_creds.x509privatekey != NULL) /*free any previous values, if any*/
                     {
-                        free((void*)handleData->credentials.x509credentials.x509privatekey);
+                        free((void*)handleData->x509_creds.x509privatekey);
                     }
-                    handleData->credentials.x509credentials.x509privatekey = temp;
+                    handleData->x509_creds.x509privatekey = temp;
                     result = IOTHUB_CLIENT_OK;
                 }
             }

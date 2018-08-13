@@ -31,6 +31,12 @@ typedef struct IOTHUB_DEVICE_CLIENT_LL_HANDLE_DATA_TAG
     IOTHUB_CLIENT_CORE_LL_HANDLE coreHandle;
 } IOTHUB_DEVICE_CLIENT_LL_HANDLE_DATA;
 
+static void destroy_client_objects(IOTHUB_DEVICE_CLIENT_LL_HANDLE_DATA* device_client_ll)
+{
+    IoTHubClientCore_LL_Destroy(device_client_ll->coreHandle);
+    free(device_client_ll);
+}
+
 IOTHUB_DEVICE_CLIENT_LL_HANDLE IoTHubDeviceClient_LL_CreateFromConnectionString(const char* connectionString, IOTHUB_CLIENT_TRANSPORT_PROVIDER protocol)
 {
     IOTHUB_DEVICE_CLIENT_LL_HANDLE_DATA* result;
@@ -43,7 +49,7 @@ IOTHUB_DEVICE_CLIENT_LL_HANDLE IoTHubDeviceClient_LL_CreateFromConnectionString(
         if ((result->coreHandle = IoTHubClientCore_LL_CreateFromConnectionString(connectionString, protocol)) == NULL)
         {
             LogError("Failed to create core handle");
-            IoTHubDeviceClient_LL_Destroy(result);
+            free(result);
             result = NULL;
         }
     }
@@ -62,7 +68,7 @@ IOTHUB_DEVICE_CLIENT_LL_HANDLE IoTHubDeviceClient_LL_Create(const IOTHUB_CLIENT_
         if ((result->coreHandle = IoTHubClientCore_LL_Create(config)) == NULL)
         {
             LogError("Failed to create core handle");
-            IoTHubDeviceClient_LL_Destroy(result);
+            free(result);
             result = NULL;
         }
     }
@@ -81,7 +87,7 @@ IOTHUB_DEVICE_CLIENT_LL_HANDLE IoTHubDeviceClient_LL_CreateWithTransport(const I
         if ((result->coreHandle = IoTHubClientCore_LL_CreateWithTransport(config)) == NULL)
         {
             LogError("Failed to create core handle");
-            IoTHubDeviceClient_LL_Destroy(result);
+            free(result);
             result = NULL;
         }
     }
@@ -100,7 +106,7 @@ IOTHUB_DEVICE_CLIENT_LL_HANDLE IoTHubDeviceClient_LL_CreateFromDeviceAuth(const 
         if ((result->coreHandle = IoTHubClientCore_LL_CreateFromDeviceAuth(iothub_uri, device_id, protocol)) == NULL)
         {
             LogError("Failed to create core handle");
-            IoTHubDeviceClient_LL_Destroy(result);
+            free(result);
             result = NULL;
         }
     }
@@ -111,8 +117,7 @@ void IoTHubDeviceClient_LL_Destroy(IOTHUB_DEVICE_CLIENT_LL_HANDLE iotHubClientHa
 {
     if (iotHubClientHandle != NULL)
     {
-        IoTHubClientCore_LL_Destroy(iotHubClientHandle->coreHandle);
-        free(iotHubClientHandle);
+        destroy_client_objects(iotHubClientHandle);
     }
 }
 
@@ -121,7 +126,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SendEventAsync(IOTHUB_DEVICE_CLIENT_L
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -136,7 +141,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_GetSendStatus(IOTHUB_DEVICE_CLIENT_LL
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -151,7 +156,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SetMessageCallback(IOTHUB_DEVICE_CLIE
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -166,7 +171,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SetConnectionStatusCallback(IOTHUB_DE
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -181,7 +186,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SetRetryPolicy(IOTHUB_DEVICE_CLIENT_L
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -196,7 +201,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_GetRetryPolicy(IOTHUB_DEVICE_CLIENT_L
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -211,7 +216,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_GetLastMessageReceiveTime(IOTHUB_DEVI
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -234,7 +239,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SetOption(IOTHUB_DEVICE_CLIENT_LL_HAN
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -249,7 +254,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SetDeviceTwinCallback(IOTHUB_DEVICE_C
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -264,7 +269,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SendReportedState(IOTHUB_DEVICE_CLIEN
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -279,7 +284,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_SetDeviceMethodCallback(IOTHUB_DEVICE
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -294,7 +299,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_DeviceMethodResponse(IOTHUB_DEVICE_CL
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -310,7 +315,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_UploadToBlob(IOTHUB_DEVICE_CLIENT_LL_
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else
@@ -325,7 +330,7 @@ IOTHUB_CLIENT_RESULT IoTHubDeviceClient_LL_UploadMultipleBlocksToBlob(IOTHUB_DEV
     IOTHUB_CLIENT_RESULT result;
     if (iotHubClientHandle == NULL)
     {
-        LogError("Input parameter cannot be NULL");
+        LogError("Input parameter Device Client handle can not be NULL");
         result = IOTHUB_CLIENT_INVALID_ARG;
     }
     else

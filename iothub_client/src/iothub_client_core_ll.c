@@ -85,6 +85,7 @@ typedef struct IOTHUB_MESSAGE_CALLBACK_DATA_TAG
     CALLBACK_TYPE type;
     IOTHUB_CLIENT_MESSAGE_CALLBACK_ASYNC callbackSync;
     IOTHUB_CLIENT_MESSAGE_CALLBACK_ASYNC_EX callbackAsync;
+    IOTHUB_CLIENT_MESSAGE_CALLBACK_ASYNC_EX callbackAsync;
     void* userContextCallback;
 }IOTHUB_MESSAGE_CALLBACK_DATA;
 
@@ -456,6 +457,9 @@ static IOTHUB_CLIENT_CORE_LL_HANDLE_DATA* initialize_iothub_client(const IOTHUB_
                     lowerLayerConfig.auth_module_handle = result->authorization_module;
                     lowerLayerConfig.moduleId = module_id;
 
+                    size_t name_len = strlen(client_config->iotHubName);
+                    size_t suffix_len = strlen(client_config->iotHubSuffix);
+
                     setTransportProtocol(result, (TRANSPORT_PROVIDER*)client_config->protocol());
                     if ((result->transportHandle = result->IoTHubTransport_Create(&lowerLayerConfig)) == NULL)
                     {
@@ -469,8 +473,21 @@ static IOTHUB_CLIENT_CORE_LL_HANDLE_DATA* initialize_iothub_client(const IOTHUB_
                         free(result);
                         result = NULL;
                     }
+                    else if ((IoTHubName = malloc(name_len + suffix_len + 2)) == NULL)
+                    {
+                        LogError("Failed allocating iothubname");
+                        result->IoTHubTransport_Destroy(result->transportHandle);
+                        destroy_blob_upload_module(result);
+                        destroy_module_method_module(result);
+                        tickcounter_destroy(result->tickCounter);
+                        IoTHubClient_Auth_Destroy(result->authorization_module);
+                        STRING_delete(product_info);
+                        free(result);
+                        result = NULL;
+                    }
                     else
                     {
+                        sprintf(IoTHubName, "%s.%s", client_config->iotHubName, client_config->iotHubSuffix);
                         /*Codes_SRS_IOTHUBCLIENT_LL_02_008: [Otherwise, IoTHubClientCore_LL_Create shall succeed and return a non-NULL handle.] */
                         result->isSharedTransport = false;
                         config = client_config;

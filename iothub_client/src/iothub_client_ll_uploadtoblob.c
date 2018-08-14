@@ -107,7 +107,6 @@ IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE IoTHubClient_LL_UploadToBlob_Create(IOTHUB_
         }
     }
     return (IOTHUB_CLIENT_LL_UPLOADTOBLOB_HANDLE)handleData;
-    
 }
 
 /*returns 0 when correlationId, sasUri contain data*/
@@ -783,8 +782,9 @@ IOTHUB_CLIENT_RESULT IoTHubClient_LL_UploadMultipleBlocksToBlob_Impl(IOTHUB_CLIE
         }
         else
         {
+#ifndef WIN32
             (void)HTTPAPIEX_SetOption(iotHubHttpApiExHandle, OPTION_CURL_VERBOSE, &handleData->curl_verbose);
-
+#endif // !WIN32
             if (
                 (IoTHubClient_Auth_Get_Credential_Type(handleData->authorization_module) == IOTHUB_CREDENTIAL_TYPE_X509) &&
 
